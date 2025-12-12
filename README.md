@@ -9,7 +9,7 @@
 
 <p align="center">
   <strong>
-    🇨🇳 中文文档 | <a href="README_EN.md">🇺🇸 English</a>
+    🇨🇳 中文文档 | <a href="README_en.md">🇺🇸 English</a>
   </strong>
 </p>
 
@@ -24,64 +24,85 @@
 * **全平台兼容**: 完美支持 **Debian 10/11/12**, **Ubuntu**, **CentOS 7/8/9**, **Alma/Rocky**, 以及 **Alpine Linux**。
 * **POSIX 标准**: 纯 `/bin/sh` 编写，无需安装 `bash`。在 `dash` (Debian) 和 `ash` (Alpine/Busybox) 上稳定运行。
 * **安全设计架构**:
-    * **头部管理块 (Managed Block)**: 将安全配置插入 `sshd_config` 的**最顶部**，从而覆盖 Debian 12 默认的 `Include` 配置陷阱。
-    * **原子化验证**: 修改后自动执行 `sshd -t` 校验，若校验失败则**自动回滚**配置，防止服务挂掉。
-    * **防失联机制**: 如果 SSH 公钥下载或部署失败，脚本**不会**强制关闭密码登录，确保你不会把自己锁在门外。
+    * **头部管理块**: 将配置插入 `sshd_config` 最顶部，完美覆盖 Debian 12 默认的 `Include` 配置陷阱。
+    * **原子化验证**: 修改后自动执行 `sshd -t` 校验，若校验失败则**自动回滚**配置。
+    * **防失联机制**: 如果 SSH 公钥下载或部署失败，脚本**不会**强制关闭密码登录。
     * **防火墙感知**: 修改端口时，自动识别并放行 `ufw` 或 `firewalld`。
-* **智能交互**:
-    * 支持从 **GitHub**、**URL** 自动拉取公钥，或支持多行**手动粘贴**。
-    * **随机高位端口**: 自动生成 20000-60000 之间的随机端口，并使用 `ss`/`netstat` 检测占用情况。
-    * **系统优化**: 可选开启 **TCP BBR** 拥塞控制及系统软件更新。
+* **自动化友好**:
+    * 支持 **无头模式 (Headless)**，通过命令行参数实现零交互无人值守安装。
+    * **随机高位端口**: 自动生成 20000-60000 之间的随机端口并检测占用。
 
 ### 🚀 快速开始
 
 请以 **root** 身份运行。
 
-#### 标准运行 (交互式)，默认中文
+#### 1. 交互式运行 (推荐)
 ```bash
 curl -fsSL [https://raw.githubusercontent.com/247like/linux-ssh-init-sh/main/init.sh](https://raw.githubusercontent.com/247like/linux-ssh-init-sh/main/init.sh) -o init.sh && chmod +x init.sh && ./init.sh
 ```
 
-#### 使用英文
+#### 2. 强制使用英文界面
 ```bash
-curl -fsSL [https://raw.githubusercontent.com/247like/linux-ssh-init-sh/main/init.sh](https://raw.githubusercontent.com/247like/linux-ssh-init-sh/main/init.sh) -o init.sh && chmod +x init.sh && ./init.sh --lang=zh
+./init.sh --lang=en
 ```
 
-### ⚙️ 参数说明
+### 🤖 自动化部署 (无头模式)
 
-脚本支持以下运行时参数：
+适用于 CI/CD 或批量装机场景。使用命令行参数传递配置，配合 `--yes` 跳过确认。
 
-| 参数 | 说明 |
-| :--- | :--- |
-| `--lang=zh` | 强制使用**中文**交互界面。 |
-| `--lang=en` | 强制使用**英文**交互界面。 |
-| `--strict` | **严格模式**。若开启，遇到任何非致命错误（如公钥下载失败、随机端口生成失败）时，脚本将**立即退出**，而不是降级处理（如回退到端口 22 或保留密码登录）。适合对安全要求极高的场景。 |
+#### 全自动运行示例
+*(配置 Root 用户、随机端口、从 GitHub 拉取公钥、开启 BBR、更新系统、自动确认)*
+
+```bash
+curl -fsSL [https://raw.githubusercontent.com/247like/linux-ssh-init-sh/main/init.sh](https://raw.githubusercontent.com/247like/linux-ssh-init-sh/main/init.sh) | sh -s -- \
+    --user=root \
+    --port=random \
+    --key-gh=247like \
+    --bbr \
+    --update \
+    --yes
+```
+
+#### 半自动示例
+*(指定公钥来源，其他选项手动选择)*
+
+```bash
+./init.sh --key-url=[https://my-server.com/id_ed25519.pub](https://my-server.com/id_ed25519.pub)
+```
+
+### ⚙️ 参数详解
+
+脚本支持丰富的命令行参数来控制行为：
+
+| 参数类别 | 参数 | 说明 |
+| :--- | :--- | :--- |
+| **基础控制** | `--lang=en` | 强制使用英文界面 |
+| | `--yes` | **自动确认**：跳过脚本最后的 "确认执行?" 询问 |
+| | `--strict` | **严格模式**：遇到任何错误立即退出 (详见下方) |
+| **用户与端口** | `--user=root` | 指定登录用户 (root 或普通用户名) |
+| | `--port=22` | 保持默认 22 端口 |
+| | `--port=random` | 生成随机高位端口 (20000-60000) |
+| | `--port=2222` | 指定具体端口号 |
+| **密钥来源** | `--key-gh=username` | 从 GitHub 用户拉取公钥 |
+| | `--key-url=url` | 从指定 URL 下载公钥 |
+| | `--key-raw="ssh-..."` | 直接传递公钥内容字符串 |
+| **系统选项** | `--update` | 开启系统软件包更新 |
+| | `--no-update` | 跳过系统更新 |
+| | `--bbr` | 开启 TCP BBR 拥塞控制 |
+| | `--no-bbr` | 不开启 BBR |
 
 ### ⚙️ 普通模式 vs 严格模式
 
 | 场景 | 普通模式 (默认) | 严格模式 (`--strict`) |
 | :--- | :--- | :--- |
 | **设计理念** | **"优先保命"** (尽力而为) | **"优先合规"** (零容忍) |
-| **公钥失败** | 如果公钥下载失败，脚本**保留密码登录**并警告。<br>👉 *结果：服务器不安全，但能登录修补。* | 脚本**立即报错退出**，不修改任何配置。<br>👉 *结果：部署中断，保持原样。* |
-| **端口失败** | 如果随机端口生成失败，回退使用 **端口 22**。 | 脚本**立即报错退出**。 |
+| **公钥失败** | 若下载失败，脚本**保留密码登录**并警告。<br>👉 *结果：服务器不安全，但能登录修补。* | 脚本**立即报错退出**，不修改任何配置。<br>👉 *结果：部署中断，保持原样。* |
+| **端口失败** | 若随机端口失败，回退使用 **端口 22**。 | 脚本**立即报错退出**。 |
 | **适用场景** | 手动操作、网络环境不稳定。 | 自动化运维、CI/CD、高安全要求环境。 |
-
-### 💡 使用示例
-
-**1. 交互式初始化 (中文):**
-```bash
-./init.sh --lang=zh
-```
-
-**2. 严格模式 (自动化/高安全场景):**
-*如果公钥下载失败，脚本将直接报错退出，而不会允许使用密码登录。*
-```bash
-./init.sh --strict
-```
 
 ### 🛠️ 执行流程细节
 
-1.  **环境检测**: 自动识别包管理器 (`apt`/`yum`/`apk`) 并安装 `curl`, `sudo`, `openssh-server` 等必要依赖。
+1.  **环境检测**: 自动识别包管理器 (`apt`/`yum`/`apk`) 并安装 `curl`, `sudo`, `openssh-server` 等依赖。
 2.  **用户管理**: 创建指定用户（若非 root）并配置免密 Sudo 权限。
 3.  **密钥部署**: 部署 SSH 公钥，自动修正 `.ssh` 目录权限，支持去重。
 4.  **SSH 加固**:

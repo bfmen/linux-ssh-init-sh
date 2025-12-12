@@ -1,22 +1,16 @@
 # Linux 服务器初始化与 SSH 安全加固
 
-# 🛡️ GAuth Migrator Pro (Google Authenticator 迁移助手)
-
-<div align="center">
-
-中文 | [English](./README_EN.md)
+<p align="center">
+  <strong>
+    🇨🇳 中文文档 | <a href="README_en.md">🇺🇸 English</a>
+  </strong>
+</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Shell-POSIX_sh-blue?style=flat-square" alt="POSIX Shell">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
   <img src="https://img.shields.io/github/v/release/247like/linux-ssh-init-sh?style=flat-square" alt="Release">
   <img src="https://img.shields.io/github/stars/247like/linux-ssh-init-sh?style=flat-square" alt="Stars">
-</p>
-
-<p align="center">
-  <strong>
-    🇨🇳 中文文档 | <a href="README_en.md">🇺🇸 English</a>
-  </strong>
 </p>
 
 ---

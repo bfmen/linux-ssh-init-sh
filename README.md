@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>
-    🇨🇳 中文文档 | <a href="README_en.md">🇺🇸 English</a>
+    🇨🇳 中文文档 | <a href="README_EN.md">🇺🇸 English</a>
   </strong>
 </p>
 

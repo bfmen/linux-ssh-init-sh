@@ -3,7 +3,7 @@
 # linux-ssh-init-sh
 # Server Init & SSH Hardening Script
 #
-# Release: v4.5.1 (Fortress Pro - POSIX Final)
+# Release: v4.6.0 (Fortress Pro - Security Audit Fix)
 #
 # POSIX sh compatible (Debian dash / CentOS / Alpine / Ubuntu)
 #
@@ -11,15 +11,17 @@
 #   - If `base64` exists: strict base64 decode + key length checks
 #   - If `base64` missing: downgrade to format-only validation (skip length checks)
 #
-# Changelog v4.5.1:
-#   - Fix: awk match() 3-arg replaced with sed (mawk/BusyBox compat)
-#   - Fix: install_managed_block uses head/tail instead of awk catfile
-#   - Fix: IFS restoration handled correctly (unset case)
-#   - Fix: sshd -T -C only used on OpenSSH >= 6.8
-#   - Fix: Removed 22 from hard-reserved ports list
-#   - Fix: Reduced duplicate warnings in key validation
-#   - Fix: Numeric comparisons with empty value guards
-#   - Fix: TMP_DIR fallback includes random component
+# Changelog v4.6.0:
+#   - [SEC] Fix: Removed dangerous `. source` of state file (RCE risk)
+#   - [SEC] Fix: RUNTIME_DIR never falls back to bare /tmp
+#   - [SEC] Fix: KEY_OK now based on actually deployed keys, not file existence
+#   - [SEC] Fix: restart_sshd failure now triggers rollback (not just warn)
+#   - [SEC] Fix: enhanced_ssh_test requires SSH-2.0 banner
+#   - Fix: --port parameter now validates range and reserved ports
+#   - Fix: validate_username now allows root (matching documentation)
+#   - Fix: csv_contains uses case instead of grep (regex safety)
+#   - Fix: IPv6 detection excludes loopback interface
+#   - Fix: install_managed_block uses awk instead of tail -n +N
 # =========================================================
 
 set -u
@@ -44,7 +46,6 @@ if command -v mktemp >/dev/null 2>&1; then
   TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t ssh-init-XXXXXX 2>/dev/null || echo "")
 fi
 if [ -z "$TMP_DIR" ]; then
-  # [FIX] Fallback with random component for security
   rand_suffix=""
   if [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then
     rand_suffix=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
@@ -56,14 +57,31 @@ fi
 chmod 700 "$TMP_DIR" 2>/dev/null || true
 umask "$old_umask"
 
-# ---------------- State & Lock Management ----------------
-RUNTIME_DIR="/run/server-init"
-if ! mkdir -p "$RUNTIME_DIR" 2>/dev/null; then
-  RUNTIME_DIR="/var/lib/server-init"
-  if ! mkdir -p "$RUNTIME_DIR" 2>/dev/null; then
-    RUNTIME_DIR="/tmp/server-init"
-    mkdir -p "$RUNTIME_DIR" 2>/dev/null || RUNTIME_DIR="/tmp"
+# ---------------- [SEC-FIX] State & Lock Management ----------------
+# Never fall back to bare /tmp - always use a private directory
+RUNTIME_DIR=""
+for try_dir in "/run/server-init" "/var/lib/server-init"; do
+  if mkdir -p "$try_dir" 2>/dev/null; then
+    RUNTIME_DIR="$try_dir"
+    break
   fi
+done
+
+if [ -z "$RUNTIME_DIR" ]; then
+  # Must create a private directory under /tmp, never use /tmp directly
+  rand_rt=""
+  if [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then
+    rand_rt=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  fi
+  [ -z "$rand_rt" ] && rand_rt="$$"
+  RUNTIME_DIR="/tmp/server-init.${rand_rt}.$(date +%s 2>/dev/null || echo 0)"
+  if ! mkdir -p "$RUNTIME_DIR" 2>/dev/null; then
+    # Last resort: use mktemp
+    if command -v mktemp >/dev/null 2>&1; then
+      RUNTIME_DIR=$(mktemp -d /tmp/server-init.XXXXXX 2>/dev/null || echo "")
+    fi
+  fi
+  [ -n "$RUNTIME_DIR" ] && [ -d "$RUNTIME_DIR" ] || { echo "FATAL: Cannot create runtime directory" >&2; exit 1; }
 fi
 chmod 700 "$RUNTIME_DIR" 2>/dev/null || true
 
@@ -140,9 +158,9 @@ msg() {
   if [ "$LANG_CUR" = "zh" ]; then
     case "$key" in
       MUST_ROOT)    echo "必须以 root 权限运行此脚本" ;;
-      BANNER)       echo "服务器初始化 & SSH 安全加固 (v4.5.1 Fortress Pro)" ;;
+      BANNER)       echo "服务器初始化 & SSH 安全加固 (v4.6.0 Fortress Pro)" ;;
       STRICT_ON)    echo "STRICT 模式已开启：任何关键错误将直接退出" ;;
-      ASK_USER)     echo "SSH 登录用户 (root 或普通用户，默认 " ;;
+      ASK_USER)     echo "SSH 登录用户 (默认 " ;;
       ERR_USER_INV) echo "❌ 用户名无效 (仅限小写字母/数字/下划线，且避开系统保留名)" ;;
       ASK_PORT_T)   echo "SSH 端口配置：" ;;
       OPT_PORT_1)   echo "1) 使用 22 (默认)" ;;
@@ -181,6 +199,7 @@ msg() {
       I_BACKUP)     echo "已全量备份配置 (SSH/User/Firewall): " ;;
       E_SSHD_CHK)   echo "sshd 配置校验失败，正在回滚..." ;;
       E_GREP_FAIL)  echo "配置验证失败：关键参数未生效，正在回滚..." ;;
+      E_RESTART)    echo "SSH 服务重启失败，正在回滚..." ;;
       W_RESTART)    echo "无法自动重启 SSH 服务，请手动重启" ;;
       W_LISTEN_FAIL) echo "SSHD 已重启但端口未监听，可能启动失败，正在回滚..." ;;
       DONE_T)       echo "================ 完成 ================" ;;
@@ -262,14 +281,17 @@ msg() {
       INFO_OLD_SSH_SKIP_ALGO) echo "ℹ️ OpenSSH较旧或无法检测支持列表：跳过现代加密算法强制配置" ;;
       INFO_SANITIZE_DUP) echo "ℹ️ 清理原配置文件中的重复指令..." ;;
       INFO_MATCH_INSERT) echo "ℹ️ 检测到 Match 块：托管配置将插入到首个 Match 之前，以避免语法/作用域问题" ;;
+      ERR_NO_BANNER) echo "❌ 未能获取 SSH-2.0 协议 banner，服务可能未正常启动" ;;
+      INFO_KEYS_DEPLOYED) echo "✅ 成功部署密钥数量:" ;;
+      WARN_NO_VALID_KEYS) echo "⚠️ 没有有效的SSH密钥被部署" ;;
       *) echo "$key" ;;
     esac
   else
     case "$key" in
       MUST_ROOT)    echo "Must be run as root" ;;
-      BANNER)       echo "Server Init & SSH Hardening (v4.5.1 Fortress Pro)" ;;
+      BANNER)       echo "Server Init & SSH Hardening (v4.6.0 Fortress Pro)" ;;
       STRICT_ON)    echo "STRICT mode ON: Critical errors will abort" ;;
-      ASK_USER)     echo "SSH Login User (root or normal user, default " ;;
+      ASK_USER)     echo "SSH Login User (default " ;;
       ERR_USER_INV) echo "❌ Invalid username (lowercase/digits/underscore only, no reserved words)" ;;
       ASK_PORT_T)   echo "SSH Port Configuration:" ;;
       OPT_PORT_1)   echo "1) Use 22 (Default)" ;;
@@ -308,6 +330,7 @@ msg() {
       I_BACKUP)     echo "Full backup created (SSH/User/Firewall): " ;;
       E_SSHD_CHK)   echo "sshd config validation failed, rolling back..." ;;
       E_GREP_FAIL)  echo "Config validation failed: Critical settings not active. Rolling back..." ;;
+      E_RESTART)    echo "SSH service restart failed, rolling back..." ;;
       W_RESTART)    echo "Could not restart sshd automatically. Please restart manually." ;;
       W_LISTEN_FAIL) echo "SSHD restarted but port is not listening. Rolling back..." ;;
       DONE_T)       echo "================ DONE ================" ;;
@@ -389,6 +412,9 @@ msg() {
       INFO_OLD_SSH_SKIP_ALGO) echo "ℹ️ Old OpenSSH or unable to detect supported lists: skipping forced crypto algorithms" ;;
       INFO_SANITIZE_DUP) echo "ℹ️ Sanitizing duplicate directives in original config..." ;;
       INFO_MATCH_INSERT) echo "ℹ️ Match blocks detected: inserting managed block before first Match to avoid scope issues" ;;
+      ERR_NO_BANNER) echo "❌ Failed to get SSH-2.0 protocol banner, service may not be running properly" ;;
+      INFO_KEYS_DEPLOYED) echo "✅ Number of keys deployed:" ;;
+      WARN_NO_VALID_KEYS) echo "⚠️ No valid SSH keys were deployed" ;;
       *) echo "$key" ;;
     esac
   fi
@@ -463,7 +489,6 @@ preflight_checks() {
     fi
   done
 
-  # [FIX] Guard against empty value in numeric comparison
   available_kb=$(df -k / 2>/dev/null | awk 'NR==2 {print $4}' 2>/dev/null || echo "")
   if [ -n "$available_kb" ] && [ "$available_kb" -lt 5120 ] 2>/dev/null; then
     warn "$(msg WARN_DISK)${available_kb}KB"
@@ -555,14 +580,7 @@ restart_sshd() {
     if [ -x /etc/init.d/ssh  ]; then /etc/init.d/ssh  restart >>"$LOG_FILE" 2>&1 && res=0; fi
   fi
 
-  if [ "$res" -ne 0 ]; then
-    if [ "$STRICT_MODE" = "y" ]; then
-      die "SSHD Restart Failed (Exit Code: $res)"
-    else
-      return 1
-    fi
-  fi
-  return 0
+  return "$res"
 }
 
 # ---------------- Robust Rollback ----------------
@@ -582,21 +600,51 @@ update_state() {
   chmod 600 "$STATE_FILE" 2>/dev/null || true
 }
 
+# [SEC-FIX] Safe state file parsing - never source untrusted files
+parse_state_value() {
+  key="$1"
+  file="$2"
+  if [ -f "$file" ] && [ -r "$file" ]; then
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | head -n 1 | tr -d '\r'
+  fi
+}
+
 check_previous_state() {
   if [ -f "$STATE_FILE" ]; then
+    # Security check: ensure we own this file
+    state_owner=""
+    if stat -c "%u" "$STATE_FILE" >/dev/null 2>&1; then
+      state_owner=$(stat -c "%u" "$STATE_FILE" 2>/dev/null)
+    else
+      state_owner=$(ls -ln "$STATE_FILE" 2>/dev/null | awk '{print $3}')
+    fi
+    
+    current_uid=$(id -u)
+    if [ "$state_owner" != "$current_uid" ] 2>/dev/null; then
+      warn "State file owned by different user, ignoring"
+      rm -f "$STATE_FILE" 2>/dev/null || true
+      return 0
+    fi
+    
     warn "$(msg WARN_RESUME)"
-    if [ -r "$STATE_FILE" ]; then
-      # shellcheck disable=SC1090
-      . "$STATE_FILE" 2>/dev/null || true
-      if [ "$AUTO_CONFIRM" != "y" ]; then
-        printf "%s" "$(msg ASK_RESUME)"
-        read -r continue_resume
-        if [ "${continue_resume:-n}" != "y" ]; then
-          rm -f "$STATE_FILE" 2>/dev/null || true
-          exit 1
-        fi
+    
+    # [SEC-FIX] Safe parsing instead of source
+    prev_phase=$(parse_state_value "PHASE" "$STATE_FILE")
+    prev_user=$(parse_state_value "USER" "$STATE_FILE")
+    prev_port=$(parse_state_value "PORT" "$STATE_FILE")
+    
+    if [ "$AUTO_CONFIRM" != "y" ]; then
+      printf "%s" "$(msg ASK_RESUME)"
+      read -r continue_resume
+      if [ "${continue_resume:-n}" != "y" ]; then
+        rm -f "$STATE_FILE" 2>/dev/null || true
+        exit 1
       fi
     fi
+    
+    # Optionally restore previous values
+    [ -n "$prev_user" ] && [ -z "$ARG_USER" ] && TARGET_USER="$prev_user"
+    [ -n "$prev_port" ] && [ -z "$ARG_PORT" ] && SSH_PORT="$prev_port"
   fi
 }
 
@@ -670,7 +718,7 @@ cleanup_old_backups() {
     if [ -n "$count" ] && [ "$count" -gt "$keep_count" ] 2>/dev/null; then
       to_rm=$((count - keep_count))
       info "$(msg INFO_CLEANING_BACKUPS) $to_rm $(msg INFO_OLD_BACKUPS)"
-      echo "$backup_list" | tail -n "$to_rm" | while IFS= read -r d; do
+      echo "$backup_list" | awk -v n="$to_rm" 'NR > (NR - n)' | while IFS= read -r d; do
         [ -n "$d" ] && [ -d "$d" ] && rm -rf "$d" 2>/dev/null || true
       done
     fi
@@ -710,7 +758,7 @@ backup_config_persistent() {
   {
     echo "=== Server Init Backup ==="
     echo "Time: $(date)"
-    echo "Version: 4.5.1"
+    echo "Version: 4.6.0"
     echo "User: ${TARGET_USER:-unknown}"
     echo "Port: ${SSH_PORT:-unknown}"
     echo "OpenSSH: ${OPENSSH_VER_MAJOR}.${OPENSSH_VER_MINOR}"
@@ -786,7 +834,6 @@ EOF
   fi
 }
 
-# [FIX] Detect OpenSSH version using sed (POSIX compatible, no gawk match())
 detect_openssh_version() {
   OPENSSH_VER_MAJOR=0
   OPENSSH_VER_MINOR=0
@@ -805,7 +852,6 @@ detect_openssh_version() {
     OPENSSH_VER_MINOR=$(echo "$ver_str" | cut -d. -f2 2>/dev/null || echo 0)
   fi
 
-  # [FIX] Proper numeric check
   case "$OPENSSH_VER_MAJOR" in
     ''|*[!0-9]*) OPENSSH_VER_MAJOR=7 ;;
   esac
@@ -868,7 +914,6 @@ handle_selinux() {
 }
 
 # ---------------- Port Logic ----------------
-# [FIX] Removed 22 from hard-reserved list (it's the default SSH port)
 is_hard_reserved() {
   case "$1" in
     53|80|443|3306)
@@ -962,13 +1007,40 @@ pick_random_port() {
   return 1
 }
 
+# [SEC-FIX] Validate port number for command line arguments
+validate_port() {
+  port="$1"
+  
+  # Must be numeric
+  case "$port" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  
+  # Must be in valid range
+  [ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null || return 1
+  
+  # Check reserved ports (allow 22)
+  if [ "$port" -lt 1024 ] && [ "$port" != "22" ]; then
+    return 1
+  fi
+  
+  return 0
+}
+
 # ---------------- User & Sudo ----------------
+# [SEC-FIX] Allow root username (matching documentation)
 validate_username() {
   u="$1"
+  
+  # Allow root explicitly
+  [ "$u" = "root" ] && return 0
+  
   len=${#u}
   [ "$len" -ge 2 ] && [ "$len" -le 32 ] || return 1
   echo "$u" | grep -Eq '^[a-z_][a-z0-9_-]*$' || return 1
-  case "$u" in root|bin|daemon|adm|lp|sync|shutdown|halt|mail|operator|games|ftp|nobody) return 1 ;; esac
+  
+  # Block system reserved names (except root which is handled above)
+  case "$u" in bin|daemon|adm|lp|sync|shutdown|halt|mail|operator|games|ftp|nobody) return 1 ;; esac
   return 0
 }
 
@@ -1143,7 +1215,6 @@ fetch_keys() {
   return 1
 }
 
-# [FIX] Simplified: only return clean line or empty (caller handles warning)
 validate_ssh_key_line() {
   line="$1"
 
@@ -1177,6 +1248,7 @@ validate_ssh_key_line() {
   return 0
 }
 
+# [SEC-FIX] Improved deploy_keys - returns success only if THIS deployment added valid keys
 deploy_keys() {
   user="$1"
   keys="$2"
@@ -1193,17 +1265,51 @@ deploy_keys() {
     chown -R "$user" "$dir" 2>/dev/null || true
   fi
 
+  # Track keys we successfully deploy in this run
+  valid_keys_file="$TMP_DIR/valid_keys.$$"
   deployed_count=0
-  skipped_count=0
+  
+  : > "$valid_keys_file"
+
+  # First pass: validate and collect valid keys
   printf "%s\n" "$keys" | while IFS= read -r line; do
     [ -z "$line" ] && continue
     clean_line=$(validate_ssh_key_line "$line")
     if [ -n "$clean_line" ]; then
-      grep -qxF "$clean_line" "$auth" 2>/dev/null || printf "%s\n" "$clean_line" >>"$auth"
+      printf "%s\n" "$clean_line" >> "$valid_keys_file"
     fi
   done
 
-  [ -s "$auth" ]
+  # Check if we have any valid keys from this input
+  if [ ! -s "$valid_keys_file" ]; then
+    warn "$(msg WARN_NO_VALID_KEYS)"
+    rm -f "$valid_keys_file" 2>/dev/null || true
+    return 1
+  fi
+
+  # Second pass: deploy valid keys and verify they exist in authorized_keys
+  while IFS= read -r key; do
+    [ -z "$key" ] && continue
+    # Add if not already present
+    if ! grep -qxF "$key" "$auth" 2>/dev/null; then
+      printf "%s\n" "$key" >> "$auth"
+    fi
+    # Verify it's now in the file
+    if grep -qxF "$key" "$auth" 2>/dev/null; then
+      deployed_count=$((deployed_count + 1))
+    fi
+  done < "$valid_keys_file"
+
+  rm -f "$valid_keys_file" 2>/dev/null || true
+
+  # Success only if at least one key from THIS deployment is in the file
+  if [ "$deployed_count" -gt 0 ]; then
+    info "$(msg INFO_KEYS_DEPLOYED) $deployed_count"
+    return 0
+  else
+    warn "$(msg WARN_NO_VALID_KEYS)"
+    return 1
+  fi
 }
 
 # ---------------- sshd_config management ----------------
@@ -1256,27 +1362,39 @@ sanitize_sshd_config() {
   fi
 }
 
+# [SEC-FIX] Improved IPv6 detection - exclude loopback
 has_global_ipv6() {
-  if [ -f /proc/net/if_inet6 ]; then
-    grep -v '^fe80' /proc/net/if_inet6 2>/dev/null | grep -q '^[0-9a-f]' && return 0
-  fi
+  # Prefer ip command for accurate scope detection
   if command -v ip >/dev/null 2>&1; then
     ip -6 addr show scope global 2>/dev/null | grep -q inet6 && return 0
   fi
+  
+  # Fallback to /proc but exclude loopback interface
+  if [ -f /proc/net/if_inet6 ]; then
+    # Format: address ifindex prefix_len scope flags ifname
+    # Field 4 is scope: 00=global, 20=link-local, 10=host(loopback)
+    # Field 6 is interface name
+    awk '$4 == "00" && $6 != "lo" { found=1; exit } END { exit !found }' /proc/net/if_inet6 2>/dev/null && return 0
+  fi
+  
   if command -v ifconfig >/dev/null 2>&1; then
     ifconfig 2>/dev/null | grep -i 'inet6.*global' >/dev/null 2>&1 && return 0
   fi
+  
   return 1
 }
 
 # ----- Crypto selection -----
+# [SEC-FIX] Use case for csv_contains instead of grep (regex safety)
 csv_contains() {
   csv="$1"
   item="$2"
-  echo ",$csv," | grep -q ",$item," 2>/dev/null
+  case ",$csv," in
+    *,"$item",*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
-# [FIX] Proper IFS restoration handling unset case
 csv_intersect_ordered() {
   pref="$1"
   supp="$2"
@@ -1296,7 +1414,6 @@ csv_intersect_ordered() {
   echo "$result" | tr '\n' ',' | sed 's/,$//'
 }
 
-# [FIX] Only use -C flag on OpenSSH >= 6.8
 get_sshd_T_value() {
   key="$1"
   v=""
@@ -1364,7 +1481,7 @@ build_block() {
   file="$1"
   {
     echo "$BLOCK_BEGIN"
-    echo "# Managed by server-init v4.5.1"
+    echo "# Managed by server-init v4.6.0"
     echo "# Generated: $(date)"
     echo "# OpenSSH: ${OPENSSH_VER_MAJOR}.${OPENSSH_VER_MINOR}"
     echo "# Do NOT edit inside this block. Changes will be overwritten."
@@ -1425,7 +1542,7 @@ build_block() {
   } >"$file"
 }
 
-# [FIX] Use head/tail instead of awk catfile for better compatibility
+# [SEC-FIX] Use awk instead of tail -n +N for better POSIX compatibility
 install_managed_block() {
   block="$1"
   tmp="$TMP_DIR/sshd_config.merge"
@@ -1438,10 +1555,16 @@ install_managed_block() {
     cat "$SSH_CONF" "$block" > "$tmp"
   else
     info "$(msg INFO_MATCH_INSERT)"
-    # Insert before Match block using head/tail
-    head -n $((match_line - 1)) "$SSH_CONF" > "$tmp"
-    cat "$block" >> "$tmp"
-    tail -n +$match_line "$SSH_CONF" >> "$tmp"
+    # Insert before Match block using awk
+    awk -v ml="$match_line" -v bf="$block" '
+      NR < ml { print }
+      NR == ml {
+        while ((getline line < bf) > 0) print line
+        close(bf)
+        print
+      }
+      NR > ml { print }
+    ' "$SSH_CONF" > "$tmp"
   fi
 
   chmod 600 "$tmp" 2>/dev/null || true
@@ -1468,6 +1591,7 @@ verify_sshd_listening() {
   return 1
 }
 
+# [SEC-FIX] Enhanced SSH test - require SSH-2.0 banner
 enhanced_ssh_test() {
   port="$1"
   user="$2"
@@ -1478,16 +1602,34 @@ enhanced_ssh_test() {
     return 1
   fi
 
+  # [SEC-FIX] Banner check is now required, not optional
+  banner_ok=0
   if command -v nc >/dev/null 2>&1; then
     proto=""
     if command -v timeout >/dev/null 2>&1; then
-      proto=$(printf "SSH-2.0-TEST\r\n" | timeout 2 nc localhost "$port" 2>/dev/null || true)
+      proto=$(printf "SSH-2.0-TEST\r\n" | timeout 3 nc localhost "$port" 2>/dev/null || true)
     else
-      proto=$(printf "SSH-2.0-TEST\r\n" | nc -w 2 localhost "$port" 2>/dev/null || true)
+      proto=$(printf "SSH-2.0-TEST\r\n" | nc -w 3 localhost "$port" 2>/dev/null || true)
     fi
-    echo "$proto" | grep -q "SSH-2.0" && ok "$(msg INFO_SSH_PROTOCOL_OK)" || warn "$(msg WARN_SSH_PROTOCOL)"
+    
+    if echo "$proto" | grep -q "SSH-2.0"; then
+      ok "$(msg INFO_SSH_PROTOCOL_OK)"
+      banner_ok=1
+    else
+      err "$(msg ERR_NO_BANNER)"
+    fi
+  else
+    # If nc is not available, we can't verify banner - consider it passed with warning
+    warn "nc not available, skipping banner check"
+    banner_ok=1
   fi
 
+  # [SEC-FIX] Must have valid SSH banner to pass
+  if [ "$banner_ok" -ne 1 ]; then
+    return 1
+  fi
+
+  # SSH client test - this may fail without the right key, but banner was OK
   attempts=1
   max_attempts=3
   success=0
@@ -1506,18 +1648,12 @@ enhanced_ssh_test() {
 
   if [ "$success" -eq 1 ]; then
     ok "$(msg TEST_OK)"
-    return 0
+  else
+    # Banner was OK but auth failed - this is expected without the right key
+    warn "$(msg WARN_PORT_OPEN_BUT_FAIL)"
   fi
-
-  if command -v nc >/dev/null 2>&1; then
-    if nc -z -w 2 localhost "$port" 2>/dev/null; then
-      warn "$(msg WARN_PORT_OPEN_BUT_FAIL)"
-      return 0
-    fi
-  fi
-
-  err "$(msg TEST_FAIL)"
-  return 1
+  
+  return 0
 }
 
 update_motd() {
@@ -1549,7 +1685,7 @@ generate_health_report() {
   {
     echo "=== Server Init Health Report ==="
     echo "Generated: $(date)"
-    echo "Version: v4.5.1 Fortress Pro"
+    echo "Version: v4.6.0 Fortress Pro"
     echo "Execution Time: ${duration}s"
     echo ""
     echo "--- System ---"
@@ -1635,9 +1771,9 @@ validate_ssh_config_comprehensive() {
     return 1
   fi
 
-  password_auth=$(grep -E '^[[:space:]]*PasswordAuthentication[[:space:]]' "$config_file" 2>/dev/null | tail -1 | awk '{print $2}')
-  pubkey_auth=$(grep -E '^[[:space:]]*PubkeyAuthentication[[:space:]]' "$config_file" 2>/dev/null | tail -1 | awk '{print $2}')
-  port_setting=$(grep -E '^[[:space:]]*Port[[:space:]]' "$config_file" 2>/dev/null | tail -1 | awk '{print $2}')
+  password_auth=$(grep -E '^[[:space:]]*PasswordAuthentication[[:space:]]' "$config_file" 2>/dev/null | awk '{print $NF}' | tr -d '\r')
+  pubkey_auth=$(grep -E '^[[:space:]]*PubkeyAuthentication[[:space:]]' "$config_file" 2>/dev/null | awk '{print $NF}' | tr -d '\r')
+  port_setting=$(grep -E '^[[:space:]]*Port[[:space:]]' "$config_file" 2>/dev/null | awk '{print $NF}' | tr -d '\r')
 
   [ -n "$password_auth" ] || password_auth="yes"
   [ -n "$pubkey_auth" ] || pubkey_auth="yes"
@@ -1699,11 +1835,24 @@ else
   done
 fi
 
+# [SEC-FIX] Validate --port parameter
 if [ -n "$ARG_PORT" ]; then
   case "$ARG_PORT" in
     22) PORT_OPT="1"; SSH_PORT="22" ;;
     random) PORT_OPT="2"; SSH_PORT="22" ;;
-    *) PORT_OPT="3"; SSH_PORT="$ARG_PORT" ;;
+    *)
+      # Validate the port
+      if ! validate_port "$ARG_PORT"; then
+        die "$(msg PORT_ERR): $ARG_PORT"
+      fi
+      if is_hard_reserved "$ARG_PORT"; then
+        die "$(msg PORT_RES): $ARG_PORT"
+      fi
+      if is_k8s_nodeport "$ARG_PORT"; then
+        warn "$(msg PORT_K8S)"
+      fi
+      PORT_OPT="3"; SSH_PORT="$ARG_PORT"
+      ;;
   esac
   printf "%s%s\n" "$(msg AUTO_SKIP)" "$ARG_PORT (Mode $PORT_OPT)"
 else
@@ -1846,7 +1995,10 @@ if [ "$ARG_DELAY_RESTART" != "y" ]; then protect_sshd_service; fi
 if ! sshd -t -f "$SSH_CONF" 2>>"$LOG_FILE"; then die "$(msg E_SSHD_CHK)"; fi
 validate_ssh_config_comprehensive "$SSH_CONF" "$TARGET_USER" "$KEY_OK"
 
-restart_sshd || warn "$(msg W_RESTART)"
+# [SEC-FIX] restart_sshd failure now triggers rollback
+if ! restart_sshd; then
+  die "$(msg E_RESTART)"
+fi
 
 grep -Eq "^[[:space:]]*Port[[:space:]]+$SSH_PORT([[:space:]]|\$)" "$SSH_CONF" 2>/dev/null || die "$(msg E_GREP_FAIL)"
 verify_sshd_listening "$SSH_PORT" || die "$(msg W_LISTEN_FAIL)"

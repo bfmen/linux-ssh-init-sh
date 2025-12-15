@@ -3,11 +3,11 @@
 # linux-ssh-init-sh
 # Server Init & SSH Hardening Script
 #
-# Release: v4.6.1 (Fortress Pro - Final Audit Fix)
+# Release: v4.6.2 (Fortress Pro - Final Audit Fix)
 #
 # POSIX sh compatible (Debian dash / CentOS / Alpine / Ubuntu)
 #
-# Changelog v4.6.1:
+# Changelog v4.6.2:
 #   - [SEC] Fix: deploy_keys() now refuses symlinks (local privilege escalation)
 #   - [SEC] Fix: Removed chown -R (symlink traversal risk)
 #   - [SEC] Fix: Added KbdInteractiveAuthentication no for true key-only auth
@@ -17,6 +17,8 @@
 #   - Fix: --delay-restart now skips listen/connection tests
 #   - Fix: safe_configure_sudo grep prefix match issue
 #   - Fix: Case-insensitive sshd_config directive matching
+#   - Fix: Replaced awk IGNORECASE with tolower() for mawk/BusyBox compatibility
+#   - Fix: Changed chown user:user to chown user: for default group handling
 # =========================================================
 
 set -u
@@ -1326,9 +1328,7 @@ deploy_keys() {
   chmod 600 "$auth" 2>/dev/null || true
 
   # [SEC-FIX] Only chown specific paths, no -R (symlink traversal risk)
-  if ! chown "${user}:${user}" "$dir" "$auth" 2>/dev/null; then
-    chown "$user" "$dir" "$auth" 2>/dev/null || true
-  fi
+  chown "${user}:" "$dir" "$auth" 2>/dev/null || chown "$user" "$dir" "$auth" 2>/dev/null || true
 
   valid_keys_file="$TMP_DIR/valid_keys.$$"
   deployed_count=0
@@ -1377,7 +1377,7 @@ cleanup_sshd_config_d() {
     for conf in "$SSH_CONF_D"/*.conf; do
       [ -f "$conf" ] || continue
       # [SEC-FIX] Case-insensitive matching
-      if awk 'BEGIN{IGNORECASE=1} /^[[:space:]]*(Port|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication|ChallengeResponseAuthentication|KbdInteractiveAuthentication|KexAlgorithms|Ciphers|MACs|AddressFamily|ListenAddress)[[:space:]]/ {exit 0} END{exit 1}' "$conf" 2>/dev/null; then
+      if awk '{line=tolower($0)} line ~ /^[[:space:]]*(port|permitrootlogin|passwordauthentication|pubkeyauthentication|challengeresponseauthentication|kbdinteractiveauthentication|kexalgorithms|ciphers|macs|addressfamily|listenaddress)[[:space:]]/ {exit 0} END{exit 1}' "$conf" 2>/dev/null; then
         mv "$conf" "${conf}.bak_server_init" 2>/dev/null || true
         warn "$(msg CLEAN_D) $conf"
       fi
@@ -1406,20 +1406,22 @@ sanitize_sshd_config() {
 
   # [SEC-FIX] Use case-insensitive matching with tolower()
   awk '
-    BEGIN { IGNORECASE = 1 }
-    /^[[:space:]]*Port[[:space:]]/ { print "# [server-init disabled] " $0; next }
-    /^[[:space:]]*PermitRootLogin[[:space:]]/ { print "# [server-init disabled] " $0; next }
-    /^[[:space:]]*PasswordAuthentication[[:space:]]/ { print "# [server-init disabled] " $0; next }
-    /^[[:space:]]*PubkeyAuthentication[[:space:]]/ { print "# [server-init disabled] " $0; next }
-    /^[[:space:]]*ChallengeResponseAuthentication[[:space:]]/ { print "# [server-init disabled] " $0; next }
-    /^[[:space:]]*KbdInteractiveAuthentication[[:space:]]/ { print "# [server-init disabled] " $0; next }
-    /^[[:space:]]*KexAlgorithms[[:space:]]/ { print "# [server-init disabled] " $0; next }
-    /^[[:space:]]*Ciphers[[:space:]]/ { print "# [server-init disabled] " $0; next }
-    /^[[:space:]]*MACs[[:space:]]/ { print "# [server-init disabled] " $0; next }
-    /^[[:space:]]*AddressFamily[[:space:]]/ { print "# [server-init disabled] " $0; next }
-    /^[[:space:]]*ListenAddress[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    {
+      low = tolower($0)
+    }
+    low ~ /^[[:space:]]*port[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    low ~ /^[[:space:]]*permitrootlogin[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    low ~ /^[[:space:]]*passwordauthentication[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    low ~ /^[[:space:]]*pubkeyauthentication[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    low ~ /^[[:space:]]*challengeresponseauthentication[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    low ~ /^[[:space:]]*kbdinteractiveauthentication[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    low ~ /^[[:space:]]*kexalgorithms[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    low ~ /^[[:space:]]*ciphers[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    low ~ /^[[:space:]]*macs[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    low ~ /^[[:space:]]*addressfamily[[:space:]]/ { print "# [server-init disabled] " $0; next }
+    low ~ /^[[:space:]]*listenaddress[[:space:]]/ { print "# [server-init disabled] " $0; next }
     { print }
-  ' "$SSH_CONF" > "$tmp_san"
+' "$SSH_CONF" > "$tmp_san"
 
   if [ -s "$tmp_san" ]; then
     cat "$tmp_san" > "$SSH_CONF"

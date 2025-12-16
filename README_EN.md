@@ -7,6 +7,9 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/247like/linux-ssh-init-sh/actions/workflows/test.yml">
+    <img src="https://github.com/247like/linux-ssh-init-sh/actions/workflows/test.yml/badge.svg" alt="Test Matrix">
+  </a>
   <img src="https://img.shields.io/badge/Shell-POSIX_sh-blue?style=flat-square" alt="POSIX Shell">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
   <img src="https://img.shields.io/github/v/release/247like/linux-ssh-init-sh?style=flat-square" alt="Release">

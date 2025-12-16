@@ -582,6 +582,12 @@ restart_sshd() {
 
   res=1
   if command -v systemctl >/dev/null 2>&1; then
+    # [兼容性优化] 尝试停止 socket。
+    # 如果系统没有 ssh.socket (如 CentOS)，命令会失败，但 || true 会让脚本继续执行，不会报错退出。
+    systemctl stop ssh.socket >/dev/null 2>&1 || true
+    systemctl disable ssh.socket >/dev/null 2>&1 || true
+    
+    # 原有的重启逻辑
     systemctl restart sshd >>"$LOG_FILE" 2>&1 || systemctl restart ssh >>"$LOG_FILE" 2>&1
     res=$?
   elif command -v rc-service >/dev/null 2>&1; then
@@ -1645,7 +1651,13 @@ verify_sshd_listening() {
     fi
     if command -v nc >/dev/null 2>&1; then
       # [SEC-FIX] Use 127.0.0.1 instead of localhost
+      # [兼容性优化]
+      # 1. 尝试 IPv4 本地回环 (大多数系统的标准情况)
+      # 2>/dev/null 屏蔽了不支持 IPv4 时的报错
       nc -z -w 1 127.0.0.1 "$port" 2>/dev/null && return 0
+      # 2. 尝试 IPv6 本地回环 (针对 Debian 12 默认开启 bindv6only 的情况)
+      # 如果系统不支持 IPv6，这行命令会静默失败，不会中断脚本
+      nc -z -w 1 ::1 "$port" >/dev/null 2>&1 && return 0
     fi
     sleep 1
     elapsed=$((elapsed + 1))

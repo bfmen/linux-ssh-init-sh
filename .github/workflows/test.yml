@@ -29,29 +29,36 @@ jobs:
           echo "🚀 Testing on image: ${{ matrix.container }}"
           chmod +x init.sh
 
-          # 启动容器并运行所有逻辑
+          # 启动容器
           docker run --rm --privileged -v $(pwd):/mnt -w /mnt ${{ matrix.container }} /bin/sh -c '
             
+            # 调试信息：打印当前系统版本
+            if [ -f /etc/redhat-release ]; then
+                echo "📝 System detected: $(cat /etc/redhat-release)"
+            fi
+
             # ============================================
-            # 1. 针对 CentOS 7 的“强效起死回生”补丁
+            # 1. 针对 CentOS 7 的“起死回生”补丁 (正则修正版)
             # ============================================
-            if [ -f /etc/redhat-release ] && grep -q "CentOS Linux 7" /etc/redhat-release; then
+            # [FIX] 改为匹配 "release 7"，兼容 "CentOS Linux release 7.x.x"
+            if [ -f /etc/redhat-release ] && grep -q "release 7" /etc/redhat-release; then
               echo "💀 Detected CentOS 7 (EOL). Fixing repositories to Vault..."
               
+              # 暴力替换所有 repo 文件 (base, updates, extras 等)
               # 1. 注释掉失效的 mirrorlist
-              sed -i "s/^mirrorlist/#mirrorlist/g" /etc/yum.repos.d/CentOS-*.repo
+              sed -i "s/^mirrorlist/#mirrorlist/g" /etc/yum.repos.d/*.repo
               
-              # 2. 启用 baseurl 并指向 vault.centos.org (处理带#和不带#的情况)
-              sed -i "s|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g" /etc/yum.repos.d/CentOS-*.repo
-              sed -i "s|^baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g" /etc/yum.repos.d/CentOS-*.repo
+              # 2. 启用 baseurl 并指向 vault
+              sed -i "s|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g" /etc/yum.repos.d/*.repo
+              sed -i "s|^baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g" /etc/yum.repos.d/*.repo
               
-              # 3. 清理缓存，防止残留
+              # 3. 强制清理缓存
               yum clean all
               rm -rf /var/cache/yum
             fi
 
             # ============================================
-            # 2. 环境补全 (安装 sudo, sshd, 生成 key)
+            # 2. 环境补全
             # ============================================
             echo "📦 Installing dependencies..."
             
@@ -74,17 +81,16 @@ jobs:
               if command -v dnf >/dev/null; then
                 dnf install -y --allowerasing curl sudo openssh-server
               else
-                # 对于 CentOS 7，这一步现在应该能成功了
+                # CentOS 7 会走这里，现在源修好了，安装应该没问题
                 yum install -y curl sudo openssh-server
               fi
               
-              # 生成主机密钥 (关键修复)
               ssh-keygen -A
               mkdir -p /run/sshd
             fi
 
             # ============================================
-            # 3. 运行你的脚本
+            # 3. 运行脚本
             # ============================================
             echo "🚀 Running init script..."
             ./init.sh --user=root --port=2222 --key-raw="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPQQDejyTCPJO3Jyw5UX9jmojb/zjgcqVuRO28fmpWU5" --no-update --bbr --delay-restart --yes --strict

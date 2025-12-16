@@ -159,7 +159,7 @@ msg() {
   if [ "$LANG_CUR" = "zh" ]; then
     case "$key" in
       MUST_ROOT)    echo "必须以 root 权限运行此脚本" ;;
-      BANNER)       echo "服务器初始化 & SSH 安全加固 (v4.6.1 Fortress Pro)" ;;
+      BANNER)       echo "服务器初始化 & SSH 安全加固 (v4.6.2 Fortress Pro)" ;;
       STRICT_ON)    echo "STRICT 模式已开启：任何关键错误将直接退出" ;;
       ASK_USER)     echo "SSH 登录用户 (默认 " ;;
       ERR_USER_INV) echo "❌ 用户名无效 (仅限小写字母/数字/下划线，且避开系统保留名)" ;;
@@ -297,7 +297,7 @@ msg() {
   else
     case "$key" in
       MUST_ROOT)    echo "Must be run as root" ;;
-      BANNER)       echo "Server Init & SSH Hardening (v4.6.1 Fortress Pro)" ;;
+      BANNER)       echo "Server Init & SSH Hardening (v4.6.2 Fortress Pro)" ;;
       STRICT_ON)    echo "STRICT mode ON: Critical errors will abort" ;;
       ASK_USER)     echo "SSH Login User (default " ;;
       ERR_USER_INV) echo "❌ Invalid username (lowercase/digits/underscore only, no reserved words)" ;;
@@ -1541,7 +1541,7 @@ build_block() {
   file="$1"
   {
     echo "$BLOCK_BEGIN"
-    echo "# Managed by server-init v4.6.1"
+    echo "# Managed by server-init v4.6.2"
     echo "# Generated: $(date)"
     echo "# OpenSSH: ${OPENSSH_VER_MAJOR}.${OPENSSH_VER_MINOR}"
     echo "# Do NOT edit inside this block. Changes will be overwritten."
@@ -1743,7 +1743,7 @@ generate_health_report() {
   {
     echo "=== Server Init Health Report ==="
     echo "Generated: $(date)"
-    echo "Version: v4.6.1 Fortress Pro"
+    echo "Version: v4.6.2 Fortress Pro"
     echo "Execution Time: ${duration}s"
     echo ""
     echo "--- System ---"
